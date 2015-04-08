@@ -16,9 +16,25 @@
  */
 package org.apache.spark.mllib.fpm
 
+import org.apache.spark.mllib.fpm.FPGrowth.FreqItemset
+import org.apache.spark.rdd.RDD
 import org.scalatest.FunSuite
 
 import org.apache.spark.mllib.util.MLlibTestSparkContext
+
+import scala.collection.immutable.IndexedSeq
+import scala.reflect.ClassTag
+
+case class FrequentItemSetSubset[T](restItems: Set[T], freq: Double)
+
+case class AssociationRule[T <: Any](from: Set[T], to: Set[T], confidence: Double)
+
+object H {
+  def allCombinations[T](s : Seq[T]): IndexedSeq[Set[T]] = {
+    (1 to s.size-1).flatMap { case size => s.combinations(size) }.map(_.toSet)
+  }
+}
+
 
 class FPGrowthSuite extends FunSuite with MLlibTestSparkContext {
 
@@ -70,6 +86,88 @@ class FPGrowthSuite extends FunSuite with MLlibTestSparkContext {
       .setNumPartitions(8)
       .run(rdd)
     assert(model1.freqItemsets.count() === 625)
+  }
+
+
+
+
+  /**
+   * TODO progi
+   * @param rdd
+   * @tparam T
+   * @return
+   */
+  def calculateRules[T: ClassTag](rdd: RDD[FreqItemset[T]]) = {
+    val frequentItemsets: RDD[(Set[T], Long)] = rdd.map(itemset => (itemset.items.toSet, itemset.freq))
+    rdd
+      .flatMap(itemSet => H.allCombinations(itemSet.items).map(
+          subCollection => (subCollection, Seq(FrequentItemSetSubset(itemSet.items.toSet.--(subCollection),itemSet.freq)))))
+      .reduceByKey(_ ++ _)
+      .join(frequentItemsets)
+      .flatMap {
+      case (left: Set[T], (subsets: Seq[FrequentItemSetSubset[T]], leftFreq:Long)) =>
+        subsets.map(right => {
+          AssociationRule(left,right.restItems,right.freq/leftFreq.toDouble)
+          })
+    }
+
+  }
+
+  test("assocation rules") {
+    val transactions = Seq(
+      "b d",
+      "b x",
+      "b y",
+      "b d",
+      "b w",
+      "d c")
+      .map(_.split(" "))
+    val rdd = sc.parallelize(transactions, 2).cache()
+
+    val fpg = new FPGrowth()
+
+    val model2 = fpg
+      .setMinSupportAbsolute(2)
+      .setNumPartitions(1)
+      .run(rdd)
+
+    val freqItemsets2 = model2.freqItemsets.collect().map { itemset =>
+      (itemset.items.toSet, itemset.freq)
+    }
+    val expected = Set(
+      (Set("b"), 5L), (Set("d"), 3L), (Set("d", "b"), 2L))
+    assert(freqItemsets2.toSet === expected)
+
+    val rules = calculateRules(model2.freqItemsets)
+
+    assert(rules.collect.toSet === Set(AssociationRule(Set("b"),Set("d"),0.4),AssociationRule(Set("d"),Set("b"),2.0/3.0)))
+
+
+  }
+
+  test("assocation rules 2") {
+    val transactions = Seq(
+      "b d t",
+      "b x",
+      "b y",
+      "b d t",
+      "b w",
+      "d c")
+      .map(_.split(" "))
+    val rdd = sc.parallelize(transactions, 2).cache()
+
+    val fpg = new FPGrowth()
+
+    val model2 = fpg
+      .setMinSupportAbsolute(2)
+      .setNumPartitions(1)
+      .run(rdd)
+
+    val rules = calculateRules(model2.freqItemsets).collect()
+
+    assert(rules.contains(AssociationRule(Set("b"),Set("d"),0.4)) === true)
+    assert(rules.contains(AssociationRule(Set("d"),Set("b"),2.0/3.0)) === true)
+    assert(rules.contains(AssociationRule(Set("b","d"),Set("t"),1.0)) === true)
   }
 
   test("FP-Growth using Int type") {
